@@ -27,6 +27,15 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
         run: strix -n -t ./ --scan-mode quick
 
+      - name: Upload Strix report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: strix-report-quick
+          path: strix_runs/
+          if-no-files-found: warn
+          retention-days: 30
+
   strix-nightly:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
@@ -43,3 +52,12 @@ jobs:
           STRIX_LLM: ${{ secrets.STRIX_LLM }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
         run: strix -n -t ./ --scan-mode deep
+
+      - name: Upload Strix report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: strix-report-deep
+          path: strix_runs/
+          if-no-files-found: warn
+          retention-days: 30
