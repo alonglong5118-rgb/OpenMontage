@@ -80,11 +80,97 @@ const BASH_FUNC_PREFIX = "BASH_FUNC_";
 // Key-shape rule, matching _KEY_RE in lib/env_allowlist.py.
 const SAFE_ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+// Allow-list: names a project .env may export. Mirrors ALLOWED_ENV_KEYS in
+// lib/env_allowlist.py (enforced by the Python loaders). A .env is untrusted
+// input, so the policy is allow-list by default-deny: anything not on this
+// list is dropped, not exported. tests/contracts/test_env_allowlist.py fails
+// if the two copies drift apart.
+const ALLOWED_ENV_KEYS = new Set([
+  'ARK_API_KEY',
+  'ARK_BASE_URL',
+  'ARK_CNY_PER_USD',
+  'ARK_SEEDANCE_MODEL',
+  'ATLASCLOUD_API_KEY',
+  'ATLAS_API_KEY',
+  'ATLAS_CLOUD_API_KEY',
+  'AZURE_SPEECH_ENDPOINT',
+  'AZURE_SPEECH_KEY',
+  'AZURE_SPEECH_REGION',
+  'AZURE_TTS_ENDPOINT',
+  'BACKLOT_PORT',
+  'BFL_API_KEY',
+  'BLENDER_PATH',
+  'COMFYUI_IMAGE_SERVER_URL',
+  'COMFYUI_MUSIC_SERVER_URL',
+  'COMFYUI_SERVER_URL',
+  'COMFYUI_VIDEO_SERVER_URL',
+  'COVERR_API_KEY',
+  'DASHSCOPE_API_KEY',
+  'DOUBAO_SPEECH_API_KEY',
+  'DOUBAO_SPEECH_VOICE_TYPE',
+  'ELEVENLABS_API_KEY',
+  'FAL_AI_API_KEY',
+  'FAL_KEY',
+  'FISH_AUDIO_API_KEY',
+  'FREESOUND_API_KEY',
+  'GCLOUD_PROJECT',
+  'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
+  'GOOGLE_APPLICATION_CREDENTIALS',
+  'GOOGLE_CLOUD_LOCATION',
+  'GOOGLE_CLOUD_PROJECT',
+  'GOOGLE_CLOUD_PROJECT_ID',
+  'GOOGLE_GENAI_USE_ENTERPRISE',
+  'GOOGLE_GENAI_USE_VERTEXAI',
+  'GOOGLE_TTS_API_KEY',
+  'HEYGEN_API_KEY',
+  'HEYGEN_CONFIG_DIR',
+  'HF_TOKEN',
+  'HIGGSFIELD_API_KEY',
+  'HIGGSFIELD_API_SECRET',
+  'HIGGSFIELD_KEY',
+  'HYPERFRAMES_API_KEY',
+  'HYPERFRAMES_QA',
+  'HYPERFRAMES_QA_RENDER',
+  'KLING_API_BASE_URL',
+  'KLING_API_KEY',
+  'MINIMAX_API_KEY',
+  'MINIMAX_BASE_URL',
+  'MINIMAX_REGION',
+  'MODAL_LTX2_ENDPOINT_URL',
+  'MUSIC_LIBRARY_DIR',
+  'NARA_API_KEY',
+  'OPENAI_API_KEY',
+  'OPENMONTAGE_CACHE_DIR',
+  'OPENMONTAGE_CACHE_MAX_GB',
+  'OPENMONTAGE_PROJECTS_DIR',
+  'OPENMONTAGE_QUIET_ENV_WARNINGS',
+  'PEXELS_API_KEY',
+  'PIXABAY_API_KEY',
+  'POND5_API_KEY',
+  'REPLICATE_API_TOKEN',
+  'RUNWAYML_API_SECRET',
+  'RUNWAY_API_KEY',
+  'RUN_KLING_DOC_LIVE_CHECK',
+  'SADTALKER_PATH',
+  'SUNO_API_KEY',
+  'TENCENT_TOKENHUB_API_KEY',
+  'UNSPLASH_ACCESS_KEY',
+  'VIDEO_GEN_LOCAL_ENABLED',
+  'VIDEO_GEN_LOCAL_MODEL',
+  'VIDEVO_API_KEY',
+  'VOLC_ACCESSKEY',
+  'VOLC_SECRETKEY',
+  'WAV2LIP_PATH',
+  'XAI_API_KEY',
+]);
+
 // True only for names a project .env is allowed to export.
 export function isSafeEnvKey(key) {
   if (key.startsWith(BASH_FUNC_PREFIX)) return false;
   if (DENIED_ENV_KEYS.has(key)) return false;
-  return SAFE_ENV_KEY.test(key);
+  if (!SAFE_ENV_KEY.test(key)) return false;
+  return ALLOWED_ENV_KEYS.has(key);
 }
 
 // Walk up ≤5 dirs from startDir; load the first .env (shell env always wins).

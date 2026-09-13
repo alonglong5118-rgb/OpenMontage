@@ -7,11 +7,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
-from dotenv import dotenv_values
-
-from lib.env_allowlist import is_allowed_env_key, warn_rejected_keys
+from lib.env_allowlist import apply_env_entries, parse_dotenv
 
 
 def load_env(project_root: Optional[Path] = None) -> None:
@@ -21,23 +19,24 @@ def load_env(project_root: Optional[Path] = None) -> None:
     .env file is untrusted input, and an unfiltered export would let it set
     LD_PRELOAD / BASH_ENV / PATH for every child process the pipeline spawns.
     See ``lib.env_allowlist`` for the rationale and the allowed key set.
+
+    The project's own ``parse_dotenv`` is used instead of python-dotenv's
+    ``dotenv_values`` on purpose: ``dotenv_values`` performs ``${VAR}``
+    interpolation *before* the allow-list is consulted, so a line such as
+    ``FAL_KEY=${AWS_SECRET_ACCESS_KEY}`` would be resolved against the
+    operator's live environment and copied in verbatim -- the key name passes
+    the allow-list, but the value is a credential that does not belong in
+    FAL_KEY. ``parse_dotenv`` keeps values literal and lets ``apply_env_entries``
+    do the gating, matching ``tools.base_tool._load_dotenv``.
     """
     if project_root is None:
         project_root = Path(__file__).resolve().parent.parent
     env_path = project_root / ".env"
     if not env_path.exists():
         return
-    rejected: List[str] = []
-    for key, value in dotenv_values(env_path).items():
-        if not is_allowed_env_key(key):
-            rejected.append(key)
-            continue
-        if value is None:
-            continue
-        # Historical behaviour: never clobber an environment variable the
-        # operator already exported.
-        os.environ.setdefault(key, value)
-    warn_rejected_keys(rejected)
+    apply_env_entries(
+        parse_dotenv(env_path.read_text(encoding="utf-8", errors="ignore"))
+    )
 
 
 def get_env(key: str, default: Optional[str] = None) -> Optional[str]:

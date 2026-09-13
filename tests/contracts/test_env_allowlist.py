@@ -104,6 +104,36 @@ def test_existing_environment_wins(monkeypatch: pytest.MonkeyPatch) -> None:
     assert os.environ["OPENAI_API_KEY"] == "from-shell"
 
 
+def test_env_loader_does_not_interpolate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """load_env must keep .env values literal, never resolve ${VAR}.
+
+    python-dotenv's ``dotenv_values`` interpolates ``${AWS_SECRET_ACCESS_KEY}``
+    against the live environment *before* the allow-list is consulted, so
+    ``FAL_KEY=${AWS_SECRET_ACCESS_KEY}`` would copy the operator's real AWS
+    secret into FAL_KEY even though the key name passes the allow-list.
+    load_env must use parse_dotenv (literal) so the value stays the literal
+    ``${AWS_SECRET_ACCESS_KEY}`` and never reaches a credential.
+    """
+    import tempfile
+    from pathlib import Path as _Path
+
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "OPERATOR-REAL-SECRET")
+    monkeypatch.delenv("FAL_KEY", raising=False)
+
+    d = _Path(tempfile.mkdtemp())
+    (d / ".env").write_text("FAL_KEY=${AWS_SECRET_ACCESS_KEY}\n")
+
+    from lib.env_loader import load_env
+
+    load_env(d)
+
+    assert os.environ.get("FAL_KEY") == "${AWS_SECRET_ACCESS_KEY}", (
+        "load_env resolved ${AWS_SECRET_ACCESS_KEY} against the live env: "
+        f"{os.environ.get('FAL_KEY')!r}"
+    )
+    assert os.environ.get("FAL_KEY") != "OPERATOR-REAL-SECRET"
+
+
 def test_registry_delegates_to_the_shared_loader(monkeypatch: pytest.MonkeyPatch) -> None:
     """Both entry points must share one parser rather than keep two copies."""
     import tools.base_tool as base_tool
@@ -388,13 +418,19 @@ _ENV_WRITE_PATTERNS = (
     re.compile(r"""os\.putenv\s*\("""),
     re.compile(r"""process\.env\[[A-Za-z_][A-Za-z0-9_]*\]\s*=(?!=)"""),
     re.compile(r"""process\.env\.[A-Za-z_][A-Za-z0-9_]*\s*=(?!=)"""),
+    # Delegating to the shared gate: lib/env_loader.load_env and
+    # tools/base_tool._load_dotenv no longer write os.environ directly, they
+    # call apply_env_entries(parse_dotenv(...)). That call is what makes them
+    # gated writers, so it must be recognised as one.
+    re.compile(r"""apply_env_entries\s*\("""),
 )
 
 # Every file allowed to write a *parsed* name into the environment. Each one
 # applies is_allowed_env_key (or, in JS, the mirrored policy) before the write.
 _GATED_ENV_WRITERS = {
     "lib/env_allowlist.py",  # the shared gate
-    "lib/env_loader.py",  # filters through is_allowed_env_key
+    "lib/env_loader.py",  # delegates to apply_env_entries
+    "tools/base_tool.py",  # delegates to apply_env_entries (import-time load)
     ".agents/skills/hyperframes-media/scripts/lib/heygen.mjs",  # mirrors it
 }
 
@@ -460,6 +496,68 @@ def test_js_env_reader_deny_list_matches_python() -> None:
         f"only-in-python={sorted(set(DENIED_ENV_KEYS) - js_keys)}. "
         "The reader is vendored so the skill ships standalone, so the list is "
         "duplicated on purpose -- keep the two identical."
+    )
+
+
+def test_js_env_reader_allow_list_matches_python() -> None:
+    """The JS reader must enforce the same allow-list, not just a deny-list.
+
+    A deny-list-only reader is allow-by-default: any name the deny-list forgot
+    is exported, including process-integrity names -- the exact shape of the
+    LD_PRELOAD gap. The two copies of ALLOWED_ENV_KEYS must therefore stay
+    identical, or the vendored JS media engine silently becomes a way around
+    the Python gate that the loaders enforce.
+    """
+    text = _JS_ENV_READER.read_text(encoding="utf-8")
+    block = re.search(
+        r"const ALLOWED_ENV_KEYS = new Set\(\[(.*?)\]\);", text, re.DOTALL
+    )
+
+    assert block, f"no ALLOWED_ENV_KEYS set found in {_JS_ENV_READER.name}"
+
+    js_keys = set(re.findall(r"""["']([A-Za-z_][A-Za-z0-9_]*)["']""", block.group(1)))
+
+    assert len(js_keys) > 40, "the JavaScript allow-list looks truncated"
+    assert js_keys == set(ALLOWED_ENV_KEYS), (
+        "the JavaScript media engine's .env reader and lib/env_allowlist.py "
+        "disagree on which names a .env may export: "
+        f"only-in-js={sorted(js_keys - ALLOWED_ENV_KEYS)}, "
+        f"only-in-python={sorted(set(ALLOWED_ENV_KEYS) - js_keys)}. "
+        "The reader is vendored so the skill ships standalone, so the list is "
+        "duplicated on purpose -- keep the two identical."
+    )
+
+
+def test_js_env_reader_is_allow_list_by_default_deny() -> None:
+    """The JS reader must drop names outside the allow-list, not export them.
+
+    This is the regression behind the earlier 7/7 process-integrity leak: a
+    deny-list-only reader exported every name it forgot. ``isSafeEnvKey`` must
+    return True only for allow-listed names, so a hostile ``.env`` carrying a
+    process-integrity name the deny-list omitted is dropped. Verified by
+    actually executing the module under node, not by reading its source.
+    """
+    import subprocess
+
+    script = (
+        "import { isSafeEnvKey } from "
+        f"'{_JS_ENV_READER.as_uri()}';\n"
+        "const leaked = ['PYTHONWARNINGS','PYTHONEXECUTABLE','PERL5OPT',"
+        "'GCONV_PATH','OPENSSL_CONF','CC','MAKEFLAGS'];\n"
+        "for (const n of leaked) { if (isSafeEnvKey(n)) { "
+        "console.error('LEAK:'+n); process.exit(1); } }\n"
+        "if (!isSafeEnvKey('FAL_KEY') || !isSafeEnvKey('HEYGEN_API_KEY')) { "
+        "console.error('MISSING-LEGIT-KEY'); process.exit(2); }\n"
+        "process.exit(0);\n"
+    )
+    res = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, (
+        "isSafeEnvKey did not enforce allow-list-by-default-deny: "
+        f"rc={res.returncode} stderr={res.stderr}"
     )
 
 
