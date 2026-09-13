@@ -34,10 +34,15 @@ const DENIED_ENV_KEYS = new Set([
   "DYLD_INSERT_LIBRARIES",
   "DYLD_LIBRARY_PATH",
   "ENV",
+  "GCLOUD_PROJECT",
   "GIT_CONFIG_GLOBAL",
   "GIT_CONFIG_SYSTEM",
   "GIT_SSH",
   "GIT_SSH_COMMAND",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "GOOGLE_CLOUD_LOCATION",
+  "GOOGLE_CLOUD_PROJECT",
+  "GOOGLE_CLOUD_PROJECT_ID",
   "HOME",
   "IFS",
   "JAVA_TOOL_OPTIONS",
@@ -110,13 +115,8 @@ const ALLOWED_ENV_KEYS = new Set([
   'FAL_KEY',
   'FISH_AUDIO_API_KEY',
   'FREESOUND_API_KEY',
-  'GCLOUD_PROJECT',
   'GEMINI_API_KEY',
   'GOOGLE_API_KEY',
-  'GOOGLE_APPLICATION_CREDENTIALS',
-  'GOOGLE_CLOUD_LOCATION',
-  'GOOGLE_CLOUD_PROJECT',
-  'GOOGLE_CLOUD_PROJECT_ID',
   'GOOGLE_GENAI_USE_ENTERPRISE',
   'GOOGLE_GENAI_USE_VERTEXAI',
   'GOOGLE_TTS_API_KEY',
@@ -160,10 +160,18 @@ const ALLOWED_ENV_KEYS = new Set([
   'XAI_API_KEY'
 ]);
 
+// Executable-selection shape, matching _EXECUTABLE_SELECTION_RE in
+// lib/env_allowlist.py. A name ending in _PATH or containing _EXEC / _BIN /
+// _CMD / _SHELL / _RUNNER conventionally names the *program* a tool spawns, so
+// fail closed on it even if a later edit re-adds it to the allow-list. Operators
+// set these in their own shell, where this reader never overrides them.
+const EXECUTABLE_SELECTION = /_PATH$|_EXEC|_BIN|_CMD|_SHELL|_RUNNER/i;
+
 // True only for names a project .env is allowed to export.
 export function isSafeEnvKey(key) {
   if (key.startsWith(BASH_FUNC_PREFIX)) return false;
   if (DENIED_ENV_KEYS.has(key)) return false;
+  if (EXECUTABLE_SELECTION.test(key) && !ALLOWED_ENV_KEYS.has(key)) return false;
   if (!SAFE_ENV_KEY.test(key)) return false;
   return ALLOWED_ENV_KEYS.has(key);
 }

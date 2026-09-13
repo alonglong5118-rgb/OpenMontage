@@ -109,14 +109,9 @@ _GOOGLE_KEYS = frozenset(
     {
         "GOOGLE_API_KEY",
         "GEMINI_API_KEY",  # alias for GOOGLE_API_KEY
-        "GOOGLE_APPLICATION_CREDENTIALS",
-        "GOOGLE_CLOUD_PROJECT",
-        "GOOGLE_CLOUD_PROJECT_ID",
-        "GOOGLE_CLOUD_LOCATION",
         "GOOGLE_GENAI_USE_ENTERPRISE",
         "GOOGLE_GENAI_USE_VERTEXAI",
         "GOOGLE_TTS_API_KEY",
-        "GCLOUD_PROJECT",
     }
 )
 
@@ -249,6 +244,19 @@ DENIED_ENV_KEYS = frozenset(
         "SSL_CERT_DIR",
         "PIP_CONFIG_FILE",
         "PIP_INDEX_URL",
+        # Google trust redirection. A project .env is untrusted input, so it must
+        # never choose which service-account credential FILE is read
+        # (GOOGLE_APPLICATION_CREDENTIALS -> tools/google_credentials.py reads it
+        # unvalidated) or which host the minted Bearer token is sent to
+        # (GOOGLE_CLOUD_LOCATION is interpolated into the Vertex request host in
+        # tools/graphics/google_imagen.py). The two project-id aliases select
+        # which project the token is used against. Operators set these in their
+        # own shell, where the loaders never override them (setdefault).
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_PROJECT_ID",
+        "GOOGLE_CLOUD_LOCATION",
+        "GCLOUD_PROJECT",
     }
 )
 

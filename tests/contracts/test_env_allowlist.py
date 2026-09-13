@@ -530,7 +530,15 @@ def test_js_env_reader_deny_list_matches_python() -> None:
     """The two copies of the deny-list must not drift apart."""
     js_keys = _js_denied_env_keys()
 
-    assert len(js_keys) > 20, "the JavaScript deny-list looks truncated"
+    # Pin the exact reviewed size so removing an entry fails CI instead of
+    # letting both copies shrink together unnoticed (a gap a scanner found in
+    # the earlier "len > 20" floor).
+    assert len(DENIED_ENV_KEYS) == 50, (
+        f"DENIED_ENV_KEYS changed size to {len(DENIED_ENV_KEYS)}; review the "
+        "diff and bump this pin only after confirming every removed/added name "
+        "is intentional."
+    )
+    assert len(js_keys) == len(DENIED_ENV_KEYS), "the JavaScript deny-list drifted in size"
     assert js_keys == set(DENIED_ENV_KEYS), (
         "the JavaScript media engine's .env reader and lib/env_allowlist.py "
         "disagree on which names a .env must never set: "
@@ -538,6 +546,53 @@ def test_js_env_reader_deny_list_matches_python() -> None:
         f"only-in-python={sorted(set(DENIED_ENV_KEYS) - js_keys)}. "
         "The reader is vendored so the skill ships standalone, so the list is "
         "duplicated on purpose -- keep the two identical."
+    )
+
+
+def test_trust_redirection_keys_denied_both_sides() -> None:
+    """Google trust-redirection names must never be honoured out of a .env.
+
+    A hostile project .env must not be able to pick which service-account
+    credential FILE is read (GOOGLE_APPLICATION_CREDENTIALS) or which HOST the
+    minted Bearer token is sent to (GOOGLE_CLOUD_LOCATION -> Vertex request
+    host). The earlier scan found both the Python and the vendored JS readers
+    allow-listed these because they were copied verbatim from the project-wide
+    key set; this pins the fix on both halves.
+    """
+    trust_redirection = (
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_PROJECT_ID",
+        "GOOGLE_CLOUD_LOCATION",
+        "GCLOUD_PROJECT",
+    )
+    for name in trust_redirection:
+        assert name in DENIED_ENV_KEYS, (
+            f"{name} must be in DENIED_ENV_KEYS (untrusted .env must not set it)"
+        )
+        assert not is_allowed_env_key(name), (
+            f"{name} must be refused by the Python gate"
+        )
+
+    # And the JS copy must refuse them too (verified by executing the module).
+    import subprocess
+
+    leaked = ",".join(trust_redirection)
+    script = (
+        "import { isSafeEnvKey } from "
+        f"'{_JS_ENV_READER.as_uri()}';\n"
+        f"for (const n of {leaked!r}.split(',')) {{ "
+        "if (isSafeEnvKey(n)) { console.error('LEAK:'+n); process.exit(1); } }\n"
+        "process.exit(0);\n"
+    )
+    res = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, (
+        "the JS reader still allow-lists a Google trust-redirection name: "
+        f"rc={res.returncode} stderr={res.stderr}"
     )
 
 
@@ -559,7 +614,12 @@ def test_js_env_reader_allow_list_matches_python() -> None:
 
     js_keys = set(re.findall(r"""["']([A-Za-z_][A-Za-z0-9_]*)["']""", block.group(1)))
 
-    assert len(js_keys) > 40, "the JavaScript allow-list looks truncated"
+    assert len(ALLOWED_ENV_KEYS) == 69, (
+        f"ALLOWED_ENV_KEYS changed size to {len(ALLOWED_ENV_KEYS)}; review the "
+        "diff and bump this pin only after confirming every removed/added name "
+        "is intentional."
+    )
+    assert len(js_keys) == len(ALLOWED_ENV_KEYS), "the JavaScript allow-list drifted in size"
     assert js_keys == set(ALLOWED_ENV_KEYS), (
         "the JavaScript media engine's .env reader and lib/env_allowlist.py "
         "disagree on which names a .env may export: "
