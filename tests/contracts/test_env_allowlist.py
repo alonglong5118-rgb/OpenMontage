@@ -16,6 +16,7 @@ import pytest
 from lib.env_allowlist import (
     ALLOWED_ENV_KEYS,
     DENIED_ENV_KEYS,
+    SHELL_ONLY_ENV_KEYS,
     apply_env_entries,
     is_allowed_env_key,
     parse_dotenv,
@@ -34,8 +35,13 @@ def _documented_keys() -> set[str]:
 
 
 def test_env_example_still_declares_keys() -> None:
-    """Guard the guard: the extractor has to actually find the documented keys."""
-    assert len(_documented_keys()) > 40
+    """Guard the guard: the extractor has to actually find the documented keys.
+
+    Round 6 收口把一批端点/路径键从 `KEY=` 改为纯注释说明（它们属 DENIED，
+    本就不该以 KEY= 形式出现在 .env.example 诱导填写），故文档键降到 38。
+    下限 30 仍能在 .env.example 被大规模清空时抓住回归。
+    """
+    assert len(_documented_keys()) > 30
 
 
 def test_every_documented_key_is_allow_listed() -> None:
@@ -272,6 +278,14 @@ _EXEMPT_ENV_KEYS = {
     # Placeholder in the "add env:<NAME>" guidance comment in
     # tools/base_tool.py, not a real variable.
     "ENVVAR_NAME",
+    # Read by code but deliberately NOT loadable from a project .env: a .env is
+    # untrusted input, so it must never relocate the HeyGen credential file
+    # (HEYGEN_CONFIG_DIR -> heygen.mjs) or silence the gate's own rejected-key
+    # diagnostic (OPENMONTAGE_QUIET_ENV_WARNINGS -> lib/env_allowlist.py). Both
+    # are refused by the gate; listing them here keeps the "every name the code
+    # reads is intentional" check honest about them being out of the .env surface.
+    "HEYGEN_CONFIG_DIR",
+    "OPENMONTAGE_QUIET_ENV_WARNINGS",
 }
 
 
@@ -533,7 +547,7 @@ def test_js_env_reader_deny_list_matches_python() -> None:
     # Pin the exact reviewed size so removing an entry fails CI instead of
     # letting both copies shrink together unnoticed (a gap a scanner found in
     # the earlier "len > 20" floor).
-    assert len(DENIED_ENV_KEYS) == 50, (
+    assert len(DENIED_ENV_KEYS) == 60, (
         f"DENIED_ENV_KEYS changed size to {len(DENIED_ENV_KEYS)}; review the "
         "diff and bump this pin only after confirming every removed/added name "
         "is intentional."
@@ -596,6 +610,166 @@ def test_trust_redirection_keys_denied_both_sides() -> None:
     )
 
 
+_ENDPOINT_SELECTION_KEYS = (
+    "MINIMAX_BASE_URL",
+    "KLING_API_BASE_URL",
+    "ARK_BASE_URL",
+    "AZURE_SPEECH_ENDPOINT",
+    "AZURE_TTS_ENDPOINT",
+    "MODAL_LTX2_ENDPOINT_URL",
+    "COMFYUI_SERVER_URL",
+    "COMFYUI_IMAGE_SERVER_URL",
+    "COMFYUI_VIDEO_SERVER_URL",
+    "COMFYUI_MUSIC_SERVER_URL",
+)
+
+
+def test_endpoint_selection_keys_are_denied_both_sides() -> None:
+    """Endpoint-override names must never be honoured out of a .env.
+
+    Each of these selects the *host* a credential-bearing request (or a POST of
+    the operator's own media) is sent to, so a hostile project .env that carries
+    one harvests the paired provider key / private asset. The values are refused
+    both by name (DENIED_ENV_KEYS) and by the endpoint-selection shape rule
+    (_ENDPOINT_SELECTION_RE), so a future *_URL / *_HOST / *_ENDPOINT addition
+    fails closed even before it is added to the list.
+    """
+    for name in _ENDPOINT_SELECTION_KEYS:
+        assert name in DENIED_ENV_KEYS, f"{name} must be in DENIED_ENV_KEYS"
+        assert not is_allowed_env_key(name), f"{name} must be refused by the gate"
+
+    # The shape rule must also catch names not in the explicit list.
+    for shape in ("SOME_NEW_URL", "ANY_ENDPOINT", "FOO_HOST", "MY_SERVER_ADDR"):
+        assert not is_allowed_env_key(shape), (
+            f"{shape} matches the endpoint-selection shape and must be refused"
+        )
+
+    import subprocess
+
+    leaked = ",".join(_ENDPOINT_SELECTION_KEYS)
+    script = (
+        "import { isSafeEnvKey } from "
+        f"'{_JS_ENV_READER.as_uri()}';\n"
+        f"for (const n of {leaked!r}.split(',')) {{ "
+        "if (isSafeEnvKey(n)) { console.error('LEAK:'+n); process.exit(1); } }\n"
+        "process.exit(0);\n"
+    )
+    res = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, (
+        "the JS reader still allow-lists an endpoint-selection name: "
+        f"rc={res.returncode} stderr={res.stderr}"
+    )
+
+
+_SHELL_ONLY_KEYS = (
+    "OPENMONTAGE_QUIET_ENV_WARNINGS",
+    "HYPERFRAMES_QA",
+    "HYPERFRAMES_QA_RENDER",
+    "RUN_KLING_DOC_LIVE_CHECK",
+)
+
+
+def test_shell_only_keys_are_denied_both_sides() -> None:
+    """Gate-control / QA switches must be set from the shell, never a .env.
+
+    OPENMONTAGE_QUIET_ENV_WARNINGS silences the only operator-visible signal
+    that a .env tried to set process-integrity variables; the QA switches flip
+    how the in-repo test run executes. Both are reachable only through the
+    untrusted file, so they are refused by the SHELL_ONLY_ENV_KEYS set on both
+    readers (an operator's own shell export is untouched, because the loaders
+    never override an existing variable).
+    """
+    for name in _SHELL_ONLY_KEYS:
+        assert name in SHELL_ONLY_ENV_KEYS, f"{name} must be in SHELL_ONLY_ENV_KEYS"
+        assert not is_allowed_env_key(name), f"{name} must be refused by the gate"
+
+    import subprocess
+
+    leaked = ",".join(_SHELL_ONLY_KEYS)
+    script = (
+        "import { isSafeEnvKey } from "
+        f"'{_JS_ENV_READER.as_uri()}';\n"
+        f"for (const n of {leaked!r}.split(',')) {{ "
+        "if (isSafeEnvKey(n)) { console.error('LEAK:'+n); process.exit(1); } }\n"
+        "process.exit(0);\n"
+    )
+    res = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, (
+        "the JS reader still allow-lists a shell-only gate/QA name: "
+        f"rc={res.returncode} stderr={res.stderr}"
+    )
+
+
+def test_heygen_config_dir_is_refused_and_contained() -> None:
+    """HEYGEN_CONFIG_DIR must not be settable from a .env.
+
+    The variable relocates the file the HeyGen engine reads as its credential;
+    a hostile .env pointing it at an attacker-chosen directory would make the
+    engine send that file's contents as X-Api-Key. The Python gate refuses it,
+    and the vendored JS reader refuses it *and* contains an operator-set value
+    to the home directory (credentialDir()).
+    """
+    assert not is_allowed_env_key("HEYGEN_CONFIG_DIR"), (
+        "HEYGEN_CONFIG_DIR must be refused by the Python gate"
+    )
+
+    import subprocess
+
+    # Refused out of .env on the JS side.
+    refuse = subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            "import { isSafeEnvKey } from "
+            f"'{_JS_ENV_READER.as_uri()}';\n"
+            "process.exit(isSafeEnvKey('HEYGEN_CONFIG_DIR') ? 1 : 0);\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert refuse.returncode == 0, (
+        "the JS reader still allow-lists HEYGEN_CONFIG_DIR: "
+        f"rc={refuse.returncode} stderr={refuse.stderr}"
+    )
+
+    # An operator-set value outside the home directory is contained to ~/.heygen
+    # (defense in depth; the .env path can never reach this branch).
+    import tempfile, textwrap
+    from pathlib import Path
+
+    loot = Path(tempfile.mkdtemp(prefix="heygen-loot-")) / "credentials"
+    loot.write_text("attacker-chosen-value\n")
+    contain = subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            textwrap.dedent(
+                f"""
+                import {{ credentialDir }} from '{_JS_ENV_READER.as_uri()}';
+                process.env.HEYGEN_CONFIG_DIR = {str(loot.parent)!r};
+                process.exit(credentialDir().endsWith('.heygen') ? 0 : 1);
+                """
+            ),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert contain.returncode == 0, (
+        "credentialDir() did not contain an out-of-home HEYGEN_CONFIG_DIR: "
+        f"rc={contain.returncode} stderr={contain.stderr}"
+    )
+
+
 def test_js_env_reader_allow_list_matches_python() -> None:
     """The JS reader must enforce the same allow-list, not just a deny-list.
 
@@ -614,7 +788,7 @@ def test_js_env_reader_allow_list_matches_python() -> None:
 
     js_keys = set(re.findall(r"""["']([A-Za-z_][A-Za-z0-9_]*)["']""", block.group(1)))
 
-    assert len(ALLOWED_ENV_KEYS) == 69, (
+    assert len(ALLOWED_ENV_KEYS) == 54, (
         f"ALLOWED_ENV_KEYS changed size to {len(ALLOWED_ENV_KEYS)}; review the "
         "diff and bump this pin only after confirming every removed/added name "
         "is intentional."

@@ -65,13 +65,18 @@ _IMAGE_VIDEO_KEYS = frozenset(
         "ATLAS_API_KEY",
         "MINIMAX_API_KEY",
         "MINIMAX_REGION",
-        "MINIMAX_BASE_URL",
+        # MINIMAX_BASE_URL is NOT here on purpose: see the endpoint-selection
+        # note in DENIED_ENV_KEYS. Its value is the *host* the request is sent
+        # to, and that request carries "Authorization: Bearer $MINIMAX_API_KEY"
+        # (tools/graphics/minimax_image.py), so a .env must never pick it.
         "REPLICATE_API_TOKEN",
         "HIGGSFIELD_API_KEY",
         "HIGGSFIELD_API_SECRET",
         "HIGGSFIELD_KEY",  # combined "<key>:<secret>" form
         "KLING_API_KEY",
-        "KLING_API_BASE_URL",
+        # KLING_API_BASE_URL is NOT here on purpose (see DENIED_ENV_KEYS):
+        # tools/_kling/client.py sends "Authorization: Bearer $KLING_API_KEY"
+        # to whatever host it names.
         "BFL_API_KEY",
         "COVERR_API_KEY",
         "NARA_API_KEY",
@@ -79,28 +84,30 @@ _IMAGE_VIDEO_KEYS = frozenset(
         "VIDEVO_API_KEY",
         "HYPERFRAMES_API_KEY",
         "HEYGEN_API_KEY",
-        "HEYGEN_CONFIG_DIR",
+        # HEYGEN_CONFIG_DIR is NOT here on purpose: see the config-dir note in
+        # DENIED_ENV_KEYS. Its value relocates the file the engine reads as its
+        # HeyGen credential, so a .env must never pick it.
         "RUNWAY_API_KEY",
         "RUNWAYML_API_SECRET",
         "ARK_API_KEY",
-        "ARK_BASE_URL",
+        # ARK_BASE_URL is NOT here on purpose (see DENIED_ENV_KEYS):
+        # tools/video/seedance_ark.py sends "Authorization: Bearer $ARK_API_KEY"
+        # to the host it names (https-only, but any https host still receives
+        # the key).
         "ARK_SEEDANCE_MODEL",
         "ARK_CNY_PER_USD",
         "VOLC_ACCESSKEY",
         "VOLC_SECRETKEY",
-        "MODAL_LTX2_ENDPOINT_URL",
+        # MODAL_LTX2_ENDPOINT_URL is NOT here on purpose (see DENIED_ENV_KEYS):
+        # tools/video/_shared.py POSTs the operator's own reference image to it.
         "VIDEO_GEN_LOCAL_ENABLED",
         "VIDEO_GEN_LOCAL_MODEL",
-        "COMFYUI_SERVER_URL",
-        # Per-capability overrides for split-GPU ComfyUI setups. The names are
-        # assembled at runtime in tools/_comfyui/client.py
-        # (COMFYUI_<CAPABILITY>_SERVER_URL), so a literal scan cannot see them;
-        # keep this set aligned with per_capability_env_var_overrides in
-        # tools/_comfyui/metadata.py, which the contract test reads as the
-        # authoritative list.
-        "COMFYUI_IMAGE_SERVER_URL",
-        "COMFYUI_VIDEO_SERVER_URL",
-        "COMFYUI_MUSIC_SERVER_URL",
+        # COMFYUI_SERVER_URL and the COMFYUI_<CAPABILITY>_SERVER_URL family are
+        # NOT here on purpose (see DENIED_ENV_KEYS): tools/_comfyui/client.py
+        # POSTs the operator's own images to whichever server they name. The
+        # runtime-assembled per-capability names (COMFYUI_<CAPABILITY>_SERVER_URL)
+        # are still covered by the endpoint-selection shape rule in
+        # is_allowed_env_key, so this set no longer needs to track them by hand.
     }
 )
 
@@ -128,8 +135,12 @@ _VOICE_KEYS = frozenset(
         "TENCENT_TOKENHUB_API_KEY",
         "AZURE_SPEECH_KEY",
         "AZURE_SPEECH_REGION",
-        "AZURE_SPEECH_ENDPOINT",
-        "AZURE_TTS_ENDPOINT",
+        # AZURE_SPEECH_ENDPOINT / AZURE_TTS_ENDPOINT are NOT here on purpose
+        # (see DENIED_ENV_KEYS): tools/analysis/azure_stt.py and
+        # tools/audio/azure_tts.py send "Ocp-Apim-Subscription-Key:
+        # $AZURE_SPEECH_KEY" to whichever host they name. AZURE_SPEECH_REGION
+        # stays allow-listed because it selects a fixed
+        # *.api.cognitive.microsoft.com host owned by Microsoft.
         "HF_TOKEN",
     }
 )
@@ -153,8 +164,6 @@ _LOCAL_TOOLING_KEYS = frozenset(
         "OPENMONTAGE_CACHE_DIR",
         "OPENMONTAGE_CACHE_MAX_GB",
         "OPENMONTAGE_PROJECTS_DIR",
-        # Silences the "ignored .env keys" note (see warn_rejected_keys).
-        "OPENMONTAGE_QUIET_ENV_WARNINGS",
         # BLENDER_PATH / SADTALKER_PATH / WAV2LIP_PATH are NOT here on purpose:
         # their values are the *program* a tool spawns (argv[0]), not a config
         # string, so a .env line for one of them is remote-code-execution. They
@@ -163,9 +172,20 @@ _LOCAL_TOOLING_KEYS = frozenset(
     }
 )
 
-# --- QA harness switches -----------------------------------------------------
-_QA_HARNESS_KEYS = frozenset(
+# Names the operator may export but a project .env must never set. These are
+# read by code that decides how this process behaves rather than by a tool as
+# configuration: a .env that can silence the rejected-key note below, or flip a
+# QA switch that lives in the same process as the test run, is a file control
+# over the gate it is being measured against. The loaders never override an
+# existing variable (setdefault), so an operator's own shell export is
+# unaffected -- only the untrusted .env override path is closed.
+SHELL_ONLY_ENV_KEYS = frozenset(
     {
+        # Suppression switch for warn_rejected_keys(). A .env that sets it hides
+        # the note that would otherwise tell the operator the file was tampered
+        # with, so it must be honoured from the operator's shell only.
+        "OPENMONTAGE_QUIET_ENV_WARNINGS",
+        # Per-invocation harness arguments, not project configuration.
         "HYPERFRAMES_QA",
         "HYPERFRAMES_QA_RENDER",
         "RUN_KLING_DOC_LIVE_CHECK",
@@ -178,7 +198,6 @@ ALLOWED_ENV_KEYS = frozenset(
     | _VOICE_KEYS
     | _MEDIA_LIBRARY_KEYS
     | _LOCAL_TOOLING_KEYS
-    | _QA_HARNESS_KEYS
 )
 
 # Process-integrity names that must never be honoured, whatever the allow-list
@@ -257,6 +276,38 @@ DENIED_ENV_KEYS = frozenset(
         "GOOGLE_CLOUD_PROJECT_ID",
         "GOOGLE_CLOUD_LOCATION",
         "GCLOUD_PROJECT",
+        # Endpoint selection. These names are consumed as the *host* a request
+        # is sent to, and the request carries one of the project's credentials
+        # or the operator's own media. Honouring one out of a project .env lets
+        # the file's author choose where a secret or a private asset is
+        # delivered, the same rule that keeps GOOGLE_CLOUD_LOCATION out of the
+        # allow-list:
+        #   tools/graphics/minimax_image.py -> MINIMAX_BASE_URL, sent with
+        #     "Authorization: Bearer $MINIMAX_API_KEY"
+        #   tools/_kling/client.py -> KLING_API_BASE_URL, sent with
+        #     "Authorization: Bearer $KLING_API_KEY"
+        #   tools/video/seedance_ark.py -> ARK_BASE_URL (https-only, but an
+        #     attacker-controlled https host still receives "$ARK_API_KEY")
+        #   tools/analysis/azure_stt.py + tools/audio/azure_tts.py ->
+        #     AZURE_SPEECH_ENDPOINT / AZURE_TTS_ENDPOINT, sent with
+        #     "Ocp-Apim-Subscription-Key: $AZURE_SPEECH_KEY"
+        #   tools/video/_shared.py -> MODAL_LTX2_ENDPOINT_URL, which POSTs the
+        #     operator's reference image to the chosen endpoint
+        #   tools/_comfyui/client.py -> COMFYUI_SERVER_URL and the
+        #     COMFYUI_<CAPABILITY>_SERVER_URL family, which POST the operator's
+        #     local images to the chosen server
+        # Operators who need an override export it in their own shell, where
+        # the loaders never replace it.
+        "MINIMAX_BASE_URL",
+        "KLING_API_BASE_URL",
+        "ARK_BASE_URL",
+        "AZURE_SPEECH_ENDPOINT",
+        "AZURE_TTS_ENDPOINT",
+        "MODAL_LTX2_ENDPOINT_URL",
+        "COMFYUI_SERVER_URL",
+        "COMFYUI_IMAGE_SERVER_URL",
+        "COMFYUI_VIDEO_SERVER_URL",
+        "COMFYUI_MUSIC_SERVER_URL",
     }
 )
 
@@ -272,6 +323,14 @@ _KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 # where the loaders never override them.
 _EXECUTABLE_SELECTION_RE = re.compile(r"_PATH$|_EXEC|_BIN|_CMD|_SHELL|_RUNNER", re.IGNORECASE)
 
+# Endpoint-selection shape: a name ending in _URL / _ENDPOINT / _SERVER_ADDR /
+# _HOST conventionally names the recipient of a request, and that request
+# usually carries a credential or the operator's own media. Fail closed on the
+# shape before the allow-list is consulted, so re-adding one of these names to
+# ALLOWED_ENV_KEYS cannot reintroduce the redirect. Operators set these in
+# their own shell, where the loaders never replace them.
+_ENDPOINT_SELECTION_RE = re.compile(r"_URL$|_ENDPOINT$|_SERVER_ADDR$|_HOST$", re.IGNORECASE)
+
 # Rejected names already reported, so the three entry points together produce
 # one note per key per process instead of repeating it on every load.
 _REPORTED_REJECTED_KEYS: Set[str] = set()
@@ -281,7 +340,11 @@ def is_allowed_env_key(key: str) -> bool:
     """Return True only for keys this project deliberately reads from ``.env``."""
     if key in DENIED_ENV_KEYS or key.startswith(_BASH_FUNC_PREFIX):
         return False
+    if key in SHELL_ONLY_ENV_KEYS:
+        return False
     if _EXECUTABLE_SELECTION_RE.search(key):
+        return False
+    if _ENDPOINT_SELECTION_RE.search(key):
         return False
     return key in ALLOWED_ENV_KEYS
 
