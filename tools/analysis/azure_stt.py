@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,11 @@ from tools.base_tool import (
 
 # Fast Transcription API version (GA).
 _API_VERSION = "2024-11-15"
+
+# An Azure region is a short slug such as "eastus" / "westeurope". Constrain the
+# charset so a .env-supplied value can never terminate the request host and
+# redirect the subscription key to another authority.
+_AZURE_REGION_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 
 # Candidate locales used for automatic language identification when the caller
 # does not pin a language. Azure Fast Transcription accepts several locales and
@@ -208,6 +214,12 @@ class AzureSpeechToText(BaseTool):
         if endpoint:
             return endpoint.rstrip("/")
         region = os.environ.get("AZURE_SPEECH_REGION", "").strip()
+        if not _AZURE_REGION_RE.fullmatch(region):
+            raise ValueError(
+                "AZURE_SPEECH_REGION must be an Azure region slug "
+                "(letters, digits and hyphens), got: "
+                f"{region!r}"
+            )
         return f"https://{region}.api.cognitive.microsoft.com"
 
     @staticmethod

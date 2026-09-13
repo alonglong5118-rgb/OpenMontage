@@ -16,6 +16,7 @@ Docs: https://learn.microsoft.com/azure/ai-services/speech-service/rest-text-to-
 from __future__ import annotations
 
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,11 @@ from tools.base_tool import (
 # Output format tokens keyed by container. Chosen for compositing quality.
 _MP3_FORMAT = "audio-48khz-192kbitrate-mono-mp3"
 _WAV_FORMAT = "riff-48khz-16bit-mono-pcm"
+
+# An Azure region is a short slug such as "eastus" / "westeurope". Constrain the
+# charset so a .env-supplied value can never terminate the request host and
+# redirect the subscription key to another authority.
+_AZURE_REGION_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 
 
 class AzureTTS(BaseTool):
@@ -192,6 +198,12 @@ class AzureTTS(BaseTool):
         if endpoint:
             return endpoint.rstrip("/")
         region = os.environ.get("AZURE_SPEECH_REGION", "").strip()
+        if not _AZURE_REGION_RE.fullmatch(region):
+            raise ValueError(
+                "AZURE_SPEECH_REGION must be an Azure region slug "
+                "(letters, digits and hyphens), got: "
+                f"{region!r}"
+            )
         return f"https://{region}.tts.speech.microsoft.com"
 
     def _resolve_voice(self, inputs: dict[str, Any]) -> str:
