@@ -223,6 +223,16 @@ export function loadEnvFromDir(startDir) {
           rejected.add(key);
           continue;
         }
+        // The VALUE is untrusted input too. A NUL byte cannot be represented in
+        // a process environment (execve rejects it), and storing the line would
+        // silently truncate it here while apply_env_entries in
+        // lib/env_allowlist.py refuses the entry outright -- the two readers
+        // would then disagree on what a .env may export. Drop it and report it
+        // like any other refused key, mirroring that check.
+        if (val.includes("\u0000")) {
+          rejected.add(key);
+          continue;
+        }
         if (!(key in process.env)) process.env[key] = val;
       }
       if (rejected.size > 0 && process.env.OPENMONTAGE_QUIET_ENV_WARNINGS !== "1") {

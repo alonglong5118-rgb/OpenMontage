@@ -596,6 +596,46 @@ def test_python_loaders_do_not_export_hostile_names(tmp_path) -> None:
     )
 
 
+def test_azure_region_value_cannot_redirect_host(monkeypatch) -> None:
+    """AZURE_SPEECH_REGION is allow-listed but its VALUE becomes the request host.
+
+    A .env-supplied value must not terminate the URL authority (via # ? / : @ or
+    a dot) and redirect the operator's Azure subscription key to an attacker
+    host. Drive the SHIPPED consumers, not a reimplementation of the f-string.
+    """
+    import pytest
+    from urllib.parse import urlparse
+
+    from tools.audio.azure_tts import AzureTTS
+    from tools.analysis.azure_stt import AzureSpeechToText
+
+    for slug in ("eastus", "westeurope", "eastus2", "brazilsouth"):
+        monkeypatch.setenv("AZURE_SPEECH_REGION", slug)
+        monkeypatch.setenv("AZURE_TTS_ENDPOINT", "")
+        monkeypatch.setenv("AZURE_SPEECH_ENDPOINT", "")
+        assert urlparse(AzureTTS()._host()).netloc.endswith(
+            ".tts.speech.microsoft.com"
+        ), f"safe region {slug!r} left the Microsoft host"
+        assert urlparse(AzureSpeechToText()._endpoint()).netloc.endswith(
+            ".api.cognitive.microsoft.com"
+        ), f"safe region {slug!r} left the Microsoft host"
+
+    for value in (
+        "attacker.example#",
+        "attacker.example?",
+        "attacker.example/",
+        "attacker.example:443",
+        "x@attacker.example",
+        "a.b",
+        "evil host",
+        "-lead",
+    ):
+        monkeypatch.setenv("AZURE_SPEECH_REGION", value)
+        for cls, meth in ((AzureTTS, "_host"), (AzureSpeechToText, "_endpoint")):
+            with pytest.raises(ValueError):
+                getattr(cls(), meth)()
+
+
 def _js_denied_env_keys() -> set[str]:
     """Denied names as they appear in the vendored JavaScript reader."""
     text = _JS_ENV_READER.read_text(encoding="utf-8")
@@ -942,6 +982,42 @@ def test_shipped_js_reader_does_not_export_hostile_names(tmp_path) -> None:
         "before the write, so a .env that travels with a cloned repository "
         "reaches every child the media engine spawns."
     )
+
+
+def test_js_reader_rejects_nul_values(tmp_path) -> None:
+    """The vendored JS reader must refuse a NUL-bearing VALUE, exactly like the
+    Python gate (apply_env_entries drops entries whose value contains a NUL).
+
+    A .env that travels with a cloned repo must not reach a child process with
+    a value the Python side would have refused -- the two readers must agree on
+    the value layer, not just on key names.
+    """
+    import json
+    import subprocess
+
+    pairs = [("HEYGEN_API_KEY", "pk-live\x00/tmp/evil"), ("FAL_KEY", "legit-key")]
+    (tmp_path / ".env").write_text("".join(f"{k}={v}\n" for k, v in pairs))
+
+    script = (
+        "import { loadEnvFromDir } from " + json.dumps(_JS_ENV_READER.as_uri()) + ";\n"
+        "delete process.env['HEYGEN_API_KEY']; delete process.env['FAL_KEY'];\n"
+        "loadEnvFromDir(" + json.dumps(str(tmp_path)) + ");\n"
+        "console.log(JSON.stringify({"
+        "nul: process.env['HEYGEN_API_KEY'],"
+        "legit: process.env['FAL_KEY']"
+        "}));\n"
+    )
+    res = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True, text=True,
+    )
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    assert out.get("nul") is None, (
+        "loadEnvFromDir accepted a NUL-bearing value the Python gate refuses: "
+        f"{out.get('nul')!r}. The two readers diverge on the value layer."
+    )
+    assert out.get("legit") == "legit-key", "legit allow-listed key was dropped"
 
 
 def test_js_env_reader_allow_list_matches_python() -> None:
