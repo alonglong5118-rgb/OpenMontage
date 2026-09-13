@@ -18,8 +18,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Pinned instead of `curl -sSL https://strix.ai/install | bash`: that
+      # installer resolves the newest release through the GitHub API and dies
+      # with "Failed to fetch version information" on shared runners (seen on
+      # run 34728031270, which failed 10s in with no scan at all). pip needs no
+      # version lookup, so the step is reproducible.
       - name: Install Strix
-        run: curl -sSL https://strix.ai/install | bash
+        run: |
+          python -m pip install --upgrade pip >/dev/null
+          pip install "strix-agent==1.6.2"
 
       - name: Run Strix quick scan
         env:
@@ -45,7 +52,9 @@ jobs:
           fetch-depth: 0
 
       - name: Install Strix
-        run: curl -sSL https://strix.ai/install | bash
+        run: |
+          python -m pip install --upgrade pip >/dev/null
+          pip install "strix-agent==1.6.2"
 
       - name: Run Strix deep scan
         env:
