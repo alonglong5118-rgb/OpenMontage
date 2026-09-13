@@ -96,6 +96,7 @@ const SHELL_ONLY_ENV_KEYS = new Set([
 
 
 
+
 // Bash exports shell functions as BASH_FUNC_<name>%%; never honour those.
 const BASH_FUNC_PREFIX = "BASH_FUNC_";
 
@@ -183,12 +184,15 @@ export function isSafeEnvKey(key) {
   if (DENIED_ENV_KEYS.has(key)) return false;
   // Executable-selection shape: a name ending in _PATH or containing _EXEC /
   // _BIN / _CMD / _SHELL / _RUNNER names the *program* a tool spawns, so a
-  // project .env must never pick it. Mirrors _EXECUTABLE_SELECTION_RE.
-  if (EXECUTABLE_SELECTION.test(key) && !ALLOWED_ENV_KEYS.has(key)) return false;
+  // project .env must never pick it. Mirrors _EXECUTABLE_SELECTION_RE. This
+  // check is unconditional and runs before the allow-list, so a future
+  // allow-list edit can never re-open redirect-by-.env on the JS side.
+  if (EXECUTABLE_SELECTION.test(key)) return false;
   // Endpoint-selection shape: a name ending in _URL / _ENDPOINT / _SERVER_ADDR
   // / _HOST names the recipient of a credential-bearing request, so a project
-  // .env must never pick it either. Mirrors _ENDPOINT_SELECTION_RE.
-  if (ENDPOINT_SELECTION.test(key) && !ALLOWED_ENV_KEYS.has(key)) return false;
+  // .env must never pick it either. Mirrors _ENDPOINT_SELECTION_RE, applied
+  // unconditionally and before the allow-list is consulted (matches Python).
+  if (ENDPOINT_SELECTION.test(key)) return false;
   if (!SAFE_ENV_KEY.test(key)) return false;
   return ALLOWED_ENV_KEYS.has(key);
 }

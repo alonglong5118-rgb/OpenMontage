@@ -89,7 +89,13 @@ def test_hostile_dotenv_never_reaches_environ(monkeypatch: pytest.MonkeyPatch) -
         ]
     )
     tracked = ("LD_PRELOAD", "BASH_ENV", "PATH", "PYTHONPATH", "FAL_KEY")
+    # Record each name before the body writes it. delenv() only registers a name
+    # for restoration when it is currently present, so an already-unset name is
+    # not recorded and the direct os.environ write below would survive teardown
+    # (the next test would then read a value no file supplied). setenv() first
+    # makes the name present so it is recorded; the delenv() leaves it absent.
     for key in tracked:
+        monkeypatch.setenv(key, "")
         monkeypatch.delenv(key, raising=False)
 
     applied, rejected = apply_env_entries(parse_dotenv(text), warn=False)
@@ -124,6 +130,11 @@ def test_env_loader_does_not_interpolate(monkeypatch: pytest.MonkeyPatch) -> Non
     from pathlib import Path as _Path
 
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "OPERATOR-REAL-SECRET")
+    # FAL_KEY is written by load_env -> apply_env_entries below, outside the
+    # monkeypatch record if we only delenv a name that is already absent. Record
+    # it first (setenv("") then delenv) so fixture teardown restores it and no
+    # value leaks into later tests (vuln-0005).
+    monkeypatch.setenv("FAL_KEY", "")
     monkeypatch.delenv("FAL_KEY", raising=False)
 
     d = _Path(tempfile.mkdtemp())
@@ -704,6 +715,67 @@ def test_shell_only_keys_are_denied_both_sides() -> None:
     )
     assert res.returncode == 0, (
         "the JS reader still allow-lists a shell-only gate/QA name: "
+        f"rc={res.returncode} stderr={res.stderr}"
+    )
+
+
+def test_shape_rule_precedence_matches_both_sides() -> None:
+    """Both readers must refuse shape-rule names *unconditionally*.
+
+    vuln-0004: an earlier regeneration gave the JS ``isSafeEnvKey`` an escape
+    clause (``&& !ALLOWED_ENV_KEYS.has(key)``) on the executable/endpoint-shape
+    checks, so a name re-added to ALLOWED_ENV_KEYS would have been honoured on
+    the JS side while Python refused it -- a drift a value-parity test could not
+    see. Both sides must refuse any name matching the shape rules regardless of
+    the allow-list, and the JS source must not carry the escape clause.
+    """
+    from lib.env_allowlist import _ENDPOINT_SELECTION_RE, _EXECUTABLE_SELECTION_RE
+
+    # Synthetic names that match the shape rules but are in neither list.
+    shape_only = (
+        "FOO_BAR_PATH",
+        "SPAWNER_BIN",
+        "RUNNER_CMD",
+        "OWN_SHELL",
+        "PLUGIN_EXEC",
+        "WEBHOOK_URL",
+        "API_ENDPOINT",
+        "DB_SERVER_ADDR",
+        "PROXY_HOST",
+    )
+    for name in shape_only:
+        assert _EXECUTABLE_SELECTION_RE.search(name) or _ENDPOINT_SELECTION_RE.search(
+            name
+        ), f"{name} should match a shape rule (test setup)"
+        assert not is_allowed_env_key(name), (
+            f"{name} matches a shape rule and must be refused by the Python gate"
+        )
+
+    # The JS copy must refuse them too, and must NOT weaken the rule with an
+    # allow-list escape clause that would re-open redirect-by-.env (vuln-0004).
+    js_text = _JS_ENV_READER.read_text(encoding="utf-8")
+    assert "&& !ALLOWED_ENV_KEYS.has(key)" not in js_text, (
+        "the JS isSafeEnvKey still lets the allow-list override a shape rule; "
+        "this re-opens redirect-by-.env on the JS side (vuln-0004 regression)"
+    )
+
+    import subprocess
+
+    leaked = ",".join(shape_only)
+    script = (
+        "import { isSafeEnvKey } from "
+        f"'{_JS_ENV_READER.as_uri()}';\n"
+        f"for (const n of {leaked!r}.split(',')) {{ "
+        "if (isSafeEnvKey(n)) { console.error('LEAK:'+n); process.exit(1); } }\n"
+        "process.exit(0);\n"
+    )
+    res = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, (
+        "the JS reader allow-lists a shape-rule name: "
         f"rc={res.returncode} stderr={res.stderr}"
     )
 
