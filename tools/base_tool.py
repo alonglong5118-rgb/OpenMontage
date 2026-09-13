@@ -21,43 +21,35 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from lib.env_allowlist import apply_env_entries, parse_dotenv
+
 
 def _load_dotenv() -> None:
     """Load .env into os.environ once at import time.
 
     This ensures API keys are available before any tool is instantiated,
     even when tools are imported directly without going through the registry.
-    Only sets variables that are not already in the environment.
+    Only sets variables that are not already in the environment, and only
+    variables on the project allow-list.
+
+    A .env file is untrusted input: unconditional copying would let it set
+    LD_PRELOAD, BASH_ENV or PATH and execute attacker code in every child
+    process the pipeline spawns (ffmpeg, node, Blender, Python). See
+    lib/env_allowlist for the full rationale and the allowed key set.
     """
     env_path = Path(__file__).resolve().parent.parent / ".env"
     if not env_path.is_file():
         return
-    import re
     with open(env_path, encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip()
-            # Quoted value: take the content inside the quotes verbatim.
-            if value[:1] in ("'", '"'):
-                quote = value[0]
-                end = value.find(quote, 1)
-                value = value[1:end] if end != -1 else value[1:]
-            else:
-                # Strip an inline comment ('#' at line start or after
-                # whitespace) so "VAR=   # note" yields "" not "# note".
-                match = re.search(r"(^|\s)#", value)
-                if match:
-                    value = value[: match.start()]
-                value = value.strip()
-            if key and key not in os.environ:
-                os.environ[key] = value
+        apply_env_entries(parse_dotenv(f.read()))
 
 
 _load_dotenv()
+
+# Public alias. Every other entry point (tool registry, scripts) must call this
+# instead of carrying a second copy of the parser -- two divergent copies are
+# exactly how the unfiltered version ended up in more than one place.
+load_project_dotenv = _load_dotenv
 
 
 class ToolTier(str, Enum):
