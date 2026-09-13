@@ -539,6 +539,63 @@ def test_only_gated_writers_touch_the_environment() -> None:
     )
 
 
+# Names and values a project .env must never be able to install. Each one is
+# consumed by the shipped readers on a real path: LD_PRELOAD / BASH_ENV /
+# BLENDER_PATH reach code execution in every spawned child, MINIMAX_BASE_URL is
+# the host a credential-bearing request is sent to, and
+# OPENMONTAGE_QUIET_ENV_WARNINGS silences the gate's own note.
+_HOSTILE_ENV_PAIRS = (
+    ("LD_PRELOAD", "/tmp/evil.so"),
+    ("BASH_ENV", "/tmp/evil.sh"),
+    ("PYTHONPATH", "/tmp/evil"),
+    ("BLENDER_PATH", "/tmp/evil-blender"),
+    ("MINIMAX_BASE_URL", "https://attacker.example"),
+    ("OPENMONTAGE_QUIET_ENV_WARNINGS", "1"),
+    ("FAL_KEY", "legit-key"),
+)
+
+
+def test_python_loaders_do_not_export_hostile_names(tmp_path) -> None:
+    """Drive the SHIPPED reader, not the gate it is supposed to call.
+
+    The gated-writer test above only asserts that a delegate is invoked, and the
+    allow-list tests call apply_env_entries directly, so neither can see a
+    module-level reader that was reverted to the pre-PR unfiltered loop. This
+    executes the delivered import path with a hostile .env in place and asserts
+    what actually reaches the environment.
+    """
+    import json
+    import subprocess
+    import sys
+
+    (tmp_path / ".env").write_text(
+        "".join(f"{key}={value}\n" for key, value in _HOSTILE_ENV_PAIRS)
+    )
+    names = sorted(key for key, _ in _HOSTILE_ENV_PAIRS)
+    code = "\n".join(
+        [
+            "import json, os, sys",
+            "for name in " + repr(names) + ":",
+            "    os.environ.pop(name, None)",
+            "sys.path.insert(0, " + repr(str(REPO_ROOT)) + ")",
+            "from pathlib import Path",
+            "from lib.env_loader import load_env",
+            "import tools.base_tool",
+            "load_env(Path(" + repr(str(tmp_path)) + "))",
+            "print(json.dumps({n: os.environ.get(n) for n in " + repr(names) + "}))",
+        ]
+    )
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+
+    assert res.returncode == 0, res.stderr
+    exported = sorted(k for k, v in json.loads(res.stdout).items() if v)
+    assert exported == ["FAL_KEY"], (
+        "a shipped Python .env reader exported names a project .env must never "
+        f"set: {exported}. Either the reader stopped delegating to "
+        "apply_env_entries, or the gate itself was weakened."
+    )
+
+
 def _js_denied_env_keys() -> set[str]:
     """Denied names as they appear in the vendored JavaScript reader."""
     text = _JS_ENV_READER.read_text(encoding="utf-8")
@@ -839,6 +896,51 @@ def test_heygen_config_dir_is_refused_and_contained() -> None:
     assert contain.returncode == 0, (
         "credentialDir() did not contain an out-of-home HEYGEN_CONFIG_DIR: "
         f"rc={contain.returncode} stderr={contain.stderr}"
+    )
+
+
+def test_shipped_js_reader_does_not_export_hostile_names(tmp_path) -> None:
+    """Drive loadEnvFromDir, not isSafeEnvKey: the write path is the sink.
+
+    The tests above execute isSafeEnvKey in isolation, so a reader whose writer
+    stopped calling it still reports a correct policy. This runs the shipped
+    reader against a hostile .env and asserts what actually reaches process.env,
+    which is the signal the engine's children inherit.
+    """
+    import json
+    import subprocess
+
+    pairs = (
+        ("LD_PRELOAD", "/tmp/evil.so"),
+        ("BASH_ENV", "/tmp/evil.sh"),
+        ("NODE_OPTIONS", "--require /tmp/evil.js"),
+        ("PYTHONPATH", "/tmp/evil"),
+        ("BLENDER_PATH", "/tmp/evil-blender"),
+        ("MINIMAX_BASE_URL", "https://attacker.example"),
+        ("OPENMONTAGE_QUIET_ENV_WARNINGS", "1"),
+        ("FAL_KEY", "legit-key"),
+    )
+    (tmp_path / ".env").write_text("".join(f"{k}={v}\n" for k, v in pairs))
+    refused = sorted(k for k, _ in pairs if k != "FAL_KEY")
+
+    script = (
+        "import { loadEnvFromDir } from " + json.dumps(_JS_ENV_READER.as_uri()) + ";\n"
+        "for (const n of " + json.dumps(refused) + ") delete process.env[n];\n"
+        "loadEnvFromDir(" + json.dumps(str(tmp_path)) + ");\n"
+        "console.log(JSON.stringify(" + json.dumps(refused) + ".filter((n) => n in process.env)));\n"
+    )
+    res = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout) == [], (
+        "loadEnvFromDir exported names a project .env must never set: "
+        f"{json.loads(res.stdout)}. The reader stopped applying isSafeEnvKey "
+        "before the write, so a .env that travels with a cloned repository "
+        "reaches every child the media engine spawns."
     )
 
 
