@@ -239,12 +239,21 @@ def _env_names_read_by_code() -> dict[str, str]:
                     )
 
     # Per-capability ComfyUI endpoints are declared as data rather than as
-    # string literals, so the patterns above cannot find them. Dynamic sites are
-    # checked separately by _dynamic_env_name_sites().
+    # string literals, so the patterns above cannot find them. The names are
+    # taken from the runtime that builds them, not reconstructed here: the
+    # declaration enumerates which capabilities exist and ComfyUIClient turns a
+    # capability into its variable name, so a change to either side surfaces on
+    # the other (see test_comfyui_capability_names_match_their_declaration).
+    from tools._comfyui.client import ComfyUIClient
     from tools._comfyui.metadata import COMFYUI_SETUP_OFFER
 
-    for name in COMFYUI_SETUP_OFFER["per_capability_env_var_overrides"].values():
-        found.setdefault(name, "tools/_comfyui/metadata.py (per_capability_env_var_overrides)")
+    for tool_name in COMFYUI_SETUP_OFFER["per_capability_env_var_overrides"]:
+        capability = tool_name.removeprefix("comfyui_")
+        name = ComfyUIClient(capability=capability)._capability_env_var
+        if name:
+            found.setdefault(
+                name, f"tools/_comfyui/client.py (ComfyUIClient(capability={capability!r}))"
+            )
 
     return found
 
@@ -287,6 +296,32 @@ def test_dynamic_env_name_sites_are_known() -> None:
     )
 
 
+def test_comfyui_capability_names_match_their_declaration() -> None:
+    """The declared override names must be the ones the runtime actually reads.
+
+    Both sides are real: the declaration says which capabilities exist, and
+    ComfyUIClient turns one into a variable name. Reading only the declaration
+    would leave the two free to drift -- editing one side would remove the name
+    from this suite's set while the runtime kept reading the old name, and every
+    check here would stay green while a .env entry was dropped in silence.
+    """
+    from tools._comfyui.client import ComfyUIClient
+    from tools._comfyui.metadata import COMFYUI_SETUP_OFFER
+
+    overrides = COMFYUI_SETUP_OFFER["per_capability_env_var_overrides"]
+
+    assert overrides, "no capability overrides declared; the derivation is stale"
+    for tool_name, declared in overrides.items():
+        capability = tool_name.removeprefix("comfyui_")
+        runtime = ComfyUIClient(capability=capability)._capability_env_var
+
+        assert runtime == declared, (
+            f"{tool_name} declares {declared!r} but ComfyUIClient builds "
+            f"{runtime!r} from capability={capability!r}. Align the two, "
+            "otherwise the name read at runtime is not the name loaded from .env."
+        )
+
+
 def test_every_key_the_code_reads_is_allow_listed() -> None:
     # DENIED_ENV_KEYS is a second gate: those names are process integrity, not
     # configuration, so no code reading them can ever justify allow-listing.
@@ -327,4 +362,180 @@ def test_documented_keys_and_code_reads_are_consistent() -> None:
         ".env.example documents keys the allow-list refuses: "
         f"{sorted(documented - ALLOWED_ENV_KEYS - _EXEMPT_ENV_KEYS)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The JavaScript surface. The media engine has a fourth .env reader that cannot
+# import lib/env_allowlist.py (the skill is vendored to ship standalone), so it
+# carries its own copy of the policy. These tests are what stops that copy from
+# becoming a way around the gate: an ungated reader on a shipped path exports
+# LD_PRELOAD / BASH_ENV / NODE_OPTIONS into every child the engine spawns, which
+# is exactly what the Python side was hardened against.
+# ---------------------------------------------------------------------------
+
+_JS_ENV_READER = (
+    REPO_ROOT
+    / ".agents/skills/hyperframes-media/scripts/lib/heygen.mjs"
+)
+
+# Assignments whose *key* is a variable, i.e. the ones that can carry a name
+# parsed out of a file. A literal-keyed write such as
+# os.environ["OPENMONTAGE_PROJECTS_DIR"] = ... sets a constant and cannot be
+# pointed anywhere by its input, so it is not a gate that needs to exist.
+_ENV_WRITE_PATTERNS = (
+    re.compile(r"""os\.environ\[[A-Za-z_][A-Za-z0-9_]*\]\s*=(?!=)"""),
+    re.compile(r"""os\.environ\.setdefault\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*,"""),
+    re.compile(r"""os\.putenv\s*\("""),
+    re.compile(r"""process\.env\[[A-Za-z_][A-Za-z0-9_]*\]\s*=(?!=)"""),
+    re.compile(r"""process\.env\.[A-Za-z_][A-Za-z0-9_]*\s*=(?!=)"""),
+)
+
+# Every file allowed to write a *parsed* name into the environment. Each one
+# applies is_allowed_env_key (or, in JS, the mirrored policy) before the write.
+_GATED_ENV_WRITERS = {
+    "lib/env_allowlist.py",  # the shared gate
+    "lib/env_loader.py",  # filters through is_allowed_env_key
+    ".agents/skills/hyperframes-media/scripts/lib/heygen.mjs",  # mirrors it
+}
+
+
+def _env_write_sites() -> dict[str, str]:
+    sites: dict[str, str] = {}
+    for path in _iter_source_files():
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for pattern in _ENV_WRITE_PATTERNS:
+            match = pattern.search(text)
+            if match:
+                location = str(path.relative_to(REPO_ROOT))
+                sites.setdefault(location, f"{location}:{_line_of(text, match.start())}")
+                break
+    return sites
+
+
+def test_only_gated_writers_touch_the_environment() -> None:
+    """A new reader must route through the gate, not add another surface."""
+    sites = _env_write_sites()
+    unexpected = sorted(set(sites) - _GATED_ENV_WRITERS)
+
+    assert unexpected == [], (
+        "these files write an environment name that could come from a parsed "
+        f".env without going through the allow-list: "
+        f"{[sites[name] for name in unexpected]}. Route the write through "
+        "lib.env_allowlist.apply_env_entries (or mirror its policy and add the "
+        "file to _GATED_ENV_WRITERS with a reason). An ungated writer on a "
+        "shipped path exports LD_PRELOAD / BASH_ENV into every child process "
+        "the pipeline spawns."
+    )
+    assert set(_GATED_ENV_WRITERS) <= set(sites), (
+        "_GATED_ENV_WRITERS lists files that no longer write to the "
+        f"environment: {sorted(set(_GATED_ENV_WRITERS) - set(sites))}. Drop "
+        "them so the list keeps proving it is intentional."
+    )
+
+
+def _js_denied_env_keys() -> set[str]:
+    """Denied names as they appear in the vendored JavaScript reader."""
+    text = _JS_ENV_READER.read_text(encoding="utf-8")
+    block = re.search(
+        r"const DENIED_ENV_KEYS = new Set\(\[(.*?)\]\);", text, re.DOTALL
+    )
+
+    assert block, f"no DENIED_ENV_KEYS set found in {_JS_ENV_READER.name}"
+
+    return set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', block.group(1)))
+
+
+def test_js_env_reader_deny_list_matches_python() -> None:
+    """The two copies of the deny-list must not drift apart."""
+    js_keys = _js_denied_env_keys()
+
+    assert len(js_keys) > 20, "the JavaScript deny-list looks truncated"
+    assert js_keys == set(DENIED_ENV_KEYS), (
+        "the JavaScript media engine's .env reader and lib/env_allowlist.py "
+        "disagree on which names a .env must never set: "
+        f"only-in-js={sorted(js_keys - DENIED_ENV_KEYS)}, "
+        f"only-in-python={sorted(set(DENIED_ENV_KEYS) - js_keys)}. "
+        "The reader is vendored so the skill ships standalone, so the list is "
+        "duplicated on purpose -- keep the two identical."
+    )
+
+
+def test_js_env_reader_rejects_the_bash_func_prefix() -> None:
+    """Shell-function smuggling is refused on the JS path too."""
+    text = _JS_ENV_READER.read_text(encoding="utf-8")
+
+    assert '"BASH_FUNC_"' in text, (
+        "the JavaScript reader no longer rejects the BASH_FUNC_ prefix, so "
+        "BASH_FUNC_x%%=... smuggles a shell function into every bash child"
+    )
+    assert "isSafeEnvKey" in text, "the JavaScript reader no longer gates writes"
+
+
+def test_rejected_key_report_is_not_a_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The diagnostic must survive warnings-as-errors.
+
+    It is emitted from module scope during `import tools.base_tool`. If it went
+    through `warnings.warn`, a .env with one unrecognised key would make that
+    import raise under -W error / PYTHONWARNINGS=error, and abort pytest at
+    collection with no tests run.
+    """
+    import warnings as warnings_module
+
+    import lib.env_allowlist as env_allowlist
+
+    monkeypatch.delenv("OPENMONTAGE_QUIET_ENV_WARNINGS", raising=False)
+    monkeypatch.setattr(env_allowlist, "_REPORTED_REJECTED_KEYS", set())
+    with warnings_module.catch_warnings():
+        warnings_module.simplefilter("error")
+
+        # Must not raise.
+        env_allowlist.warn_rejected_keys(["NOT_ALLOW_LISTED_KEY"])
+
+
+def test_rejected_key_report_can_be_silenced(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import lib.env_allowlist as env_allowlist
+
+    monkeypatch.setenv("OPENMONTAGE_QUIET_ENV_WARNINGS", "1")
+    monkeypatch.setattr(env_allowlist, "_REPORTED_REJECTED_KEYS", set())
+
+    env_allowlist.warn_rejected_keys(["SILENCED_UNLISTED_KEY"])
+
+    assert capsys.readouterr().err == ""
+
+
+def test_rejected_key_report_names_the_dropped_keys(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import lib.env_allowlist as env_allowlist
+
+    monkeypatch.delenv("OPENMONTAGE_QUIET_ENV_WARNINGS", raising=False)
+    monkeypatch.setattr(env_allowlist, "_REPORTED_REJECTED_KEYS", set())
+
+    env_allowlist.warn_rejected_keys(["SITE_LOCAL_UNLISTED_KEY"])
+
+    assert "SITE_LOCAL_UNLISTED_KEY" in capsys.readouterr().err
+
+
+def test_rejected_key_report_does_not_repeat_itself(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Three entry points load the same .env; report each name once."""
+    import lib.env_allowlist as env_allowlist
+
+    monkeypatch.delenv("OPENMONTAGE_QUIET_ENV_WARNINGS", raising=False)
+    monkeypatch.setattr(env_allowlist, "_REPORTED_REJECTED_KEYS", set())
+
+    env_allowlist.warn_rejected_keys(["REPEATED_UNLISTED_KEY"])
+    env_allowlist.warn_rejected_keys(["REPEATED_UNLISTED_KEY"])
+
+    assert capsys.readouterr().err.count("REPEATED_UNLISTED_KEY") == 1
+
+
 

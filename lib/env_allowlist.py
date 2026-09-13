@@ -1,6 +1,6 @@
 """Allow-list gating for values read from a project ``.env`` file.
 
-Three entry points load the project ``.env`` and copy its entries into
+Three Python entry points load the project ``.env`` and copy its entries into
 ``os.environ``:
 
 * ``tools.base_tool._load_dotenv`` -- runs at import time.
@@ -29,18 +29,27 @@ environment elsewhere in the tree. ``DENIED_ENV_KEYS`` is a second, narrower
 gate that keeps the process-integrity keys out even if one is ever added to the
 allow-list by mistake -- the allow-list stays the primary defence.
 
-``tests/contracts/test_env_allowlist.py`` enforces both halves of that claim: it
-checks the allow-list against ``.env.example`` *and* statically collects every
-environment name the tree resolves, so a miss fails CI instead of silently
-dropping configuration at runtime.
+Scope: this module gates the Python loaders listed above. The JavaScript media
+engine has a fourth reader with its own parser --
+``loadEnvFromDir()`` in
+``.agents/skills/hyperframes-media/scripts/lib/heygen.mjs`` -- which cannot
+import this module because that skill is vendored to ship standalone. It
+applies the same ``DENIED_ENV_KEYS`` policy plus the same key-shape rule, and
+``tests/contracts/test_env_allowlist.py`` fails if the two copies drift apart or
+if any other file starts writing a parsed ``.env`` into the environment.
+
+``tests/contracts/test_env_allowlist.py`` also enforces both halves of the
+allow-list claim: it checks the allow-list against ``.env.example`` *and*
+statically collects every environment name the tree resolves, so a miss fails
+CI instead of silently dropping configuration at runtime.
 """
 
 from __future__ import annotations
 
 import os
 import re
-import warnings
-from typing import Iterable, List, Tuple
+import sys
+from typing import Iterable, List, Set, Tuple
 
 # --- Image / video generation ------------------------------------------------
 _IMAGE_VIDEO_KEYS = frozenset(
@@ -150,6 +159,8 @@ _LOCAL_TOOLING_KEYS = frozenset(
         "OPENMONTAGE_CACHE_DIR",
         "OPENMONTAGE_CACHE_MAX_GB",
         "OPENMONTAGE_PROJECTS_DIR",
+        # Silences the "ignored .env keys" note (see warn_rejected_keys).
+        "OPENMONTAGE_QUIET_ENV_WARNINGS",
         "SADTALKER_PATH",
         "WAV2LIP_PATH",
     }
@@ -233,6 +244,10 @@ _BASH_FUNC_PREFIX = "BASH_FUNC_"
 
 _KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
+# Rejected names already reported, so the three entry points together produce
+# one note per key per process instead of repeating it on every load.
+_REPORTED_REJECTED_KEYS: Set[str] = set()
+
 
 def is_allowed_env_key(key: str) -> bool:
     """Return True only for keys this project deliberately reads from ``.env``."""
@@ -299,15 +314,28 @@ def apply_env_entries(
 
 
 def warn_rejected_keys(rejected: Iterable[str]) -> None:
-    """Report dropped keys once, with a hint on how a legitimate key is added."""
-    unique = sorted(set(rejected))
+    """Report dropped keys once per process, with a hint on how one is added.
+
+    Deliberately *not* ``warnings.warn``. This is a note about configuration
+    lines that were ignored, and the primary caller runs at module scope in
+    ``tools/base_tool.py``. Under ``-W error`` / ``PYTHONWARNINGS=error`` a
+    warning is raised as an exception, which made importing the tool package
+    abort the caller and stopped pytest at collection with no tests run -- a
+    line in ``.env`` must never be able to do that. Writing to stderr keeps the
+    note visible and immune to warning filters; set
+    ``OPENMONTAGE_QUIET_ENV_WARNINGS=1`` to silence it.
+    """
+    if os.environ.get("OPENMONTAGE_QUIET_ENV_WARNINGS") == "1":
+        return
+    unique = sorted(set(rejected) - _REPORTED_REJECTED_KEYS)
     if not unique:
         return
+    _REPORTED_REJECTED_KEYS.update(unique)
     shown = ", ".join(unique[:10])
     suffix = f" (+{len(unique) - 10} more)" if len(unique) > 10 else ""
-    warnings.warn(
-        "Ignored .env keys outside the OpenMontage allow-list: "
+    print(
+        "! ignored .env keys outside the OpenMontage allow-list: "
         f"{shown}{suffix}. Add the variable to lib/env_allowlist.py if the "
         "project is meant to read it.",
-        stacklevel=3,
+        file=sys.stderr,
     )

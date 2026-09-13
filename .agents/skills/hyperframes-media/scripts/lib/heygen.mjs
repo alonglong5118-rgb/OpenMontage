@@ -11,12 +11,89 @@ import { dirname, join, resolve } from "node:path";
 
 export const HEYGEN_BASE = "https://api.heygen.com/v3";
 
+// Process-integrity names a .env must never be able to set.
+//
+// A .env is untrusted input: it can arrive with a cloned repository, an
+// imported project bundle or a shared template. These names decide which
+// libraries, shell startup files and interpreter options every child the media
+// engine spawns (python3, node, ffmpeg) picks up, so honouring one out of a
+// .env hands the file's author code execution in those children.
+//
+// This mirrors DENIED_ENV_KEYS in lib/env_allowlist.py, which the Python
+// loaders (tools/base_tool.py, tools/tool_registry.py, lib/env_loader.py)
+// enforce. The list is inlined rather than imported because this file is
+// vendored so the skill ships standalone; tests/contracts/test_env_allowlist.py
+// fails if the two copies drift apart.
+const DENIED_ENV_KEYS = new Set([
+  // Dynamic loader / injected libraries.
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "LD_AUDIT",
+  "DYLD_INSERT_LIBRARIES",
+  "DYLD_LIBRARY_PATH",
+  "DYLD_FRAMEWORK_PATH",
+  // Shell startup hooks.
+  "BASH_ENV",
+  "ENV",
+  "SHELLOPTS",
+  "BASHOPTS",
+  "PROMPT_COMMAND",
+  "IFS",
+  // Interpreter search paths and startup hooks.
+  "PYTHONPATH",
+  "PYTHONHOME",
+  "PYTHONSTARTUP",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "NODE_EXTRA_CA_CERTS",
+  "PERL5LIB",
+  "RUBYLIB",
+  "CLASSPATH",
+  "JAVA_TOOL_OPTIONS",
+  "_JAVA_OPTIONS",
+  // Process and session basics.
+  "PATH",
+  "HOME",
+  "TMPDIR",
+  "PWD",
+  "OLDPWD",
+  "SHELL",
+  "USER",
+  "LOGNAME",
+  // Credential and trust-store redirection.
+  "SSH_AUTH_SOCK",
+  "GIT_SSH",
+  "GIT_SSH_COMMAND",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_SYSTEM",
+  "REQUESTS_CA_BUNDLE",
+  "CURL_CA_BUNDLE",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "PIP_CONFIG_FILE",
+  "PIP_INDEX_URL",
+]);
+
+// Bash exports shell functions as BASH_FUNC_<name>%%; never honour those.
+const BASH_FUNC_PREFIX = "BASH_FUNC_";
+
+// Key-shape rule, matching _KEY_RE in lib/env_allowlist.py.
+const SAFE_ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+// True only for names a project .env is allowed to export.
+export function isSafeEnvKey(key) {
+  if (key.startsWith(BASH_FUNC_PREFIX)) return false;
+  if (DENIED_ENV_KEYS.has(key)) return false;
+  return SAFE_ENV_KEY.test(key);
+}
+
 // Walk up ≤5 dirs from startDir; load the first .env (shell env always wins).
 export function loadEnvFromDir(startDir) {
   let dir = resolve(startDir);
   for (let i = 0; i < 5; i++) {
     const envPath = join(dir, ".env");
     if (existsSync(envPath)) {
+      const rejected = new Set();
       for (const raw of readFileSync(envPath, "utf8").split("\n")) {
         let line = raw.trim();
         if (!line || line.startsWith("#")) continue;
@@ -30,7 +107,19 @@ export function loadEnvFromDir(startDir) {
           const end = val.indexOf(q, 1);
           val = end > 0 ? val.slice(1, end) : val.slice(1);
         }
+        // Dropping a key is not a reason to fail the engine: a .env carrying a
+        // site-local variable must still let the pipeline run.
+        if (!isSafeEnvKey(key)) {
+          rejected.add(key);
+          continue;
+        }
         if (!(key in process.env)) process.env[key] = val;
+      }
+      if (rejected.size > 0) {
+        process.stderr.write(
+          `! ignored .env keys that could redirect the child processes this engine spawns: ` +
+            `${[...rejected].sort().join(", ")}\n`,
+        );
       }
       return;
     }
