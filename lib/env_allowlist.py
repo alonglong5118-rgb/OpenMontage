@@ -29,8 +29,10 @@ environment elsewhere in the tree. ``DENIED_ENV_KEYS`` is a second, narrower
 gate that keeps the process-integrity keys out even if one is ever added to the
 allow-list by mistake -- the allow-list stays the primary defence.
 
-``tests/contracts/test_env_allowlist.py`` keeps the allow-list in sync with
-``.env.example``.
+``tests/contracts/test_env_allowlist.py`` enforces both halves of that claim: it
+checks the allow-list against ``.env.example`` *and* statically collects every
+environment name the tree resolves, so a miss fails CI instead of silently
+dropping configuration at runtime.
 """
 
 from __future__ import annotations
@@ -45,6 +47,13 @@ _IMAGE_VIDEO_KEYS = frozenset(
     {
         "FAL_KEY",  # fal.ai gateway (FLUX images, Veo/Kling/MiniMax video)
         "FAL_AI_API_KEY",  # alias for FAL_KEY
+        # Atlas Cloud (atlas_image / atlas_video / atlas_3d). tools/atlas_client.py
+        # and tools/graphics/atlas_3d.py walk this alias chain in order, and the
+        # atlas tools declare "env:ATLASCLOUD_API_KEY" as a dependency, so
+        # dropping any of the three disables the provider without a diagnostic.
+        "ATLASCLOUD_API_KEY",
+        "ATLAS_CLOUD_API_KEY",
+        "ATLAS_API_KEY",
         "MINIMAX_API_KEY",
         "MINIMAX_REGION",
         "MINIMAX_BASE_URL",
@@ -74,7 +83,15 @@ _IMAGE_VIDEO_KEYS = frozenset(
         "VIDEO_GEN_LOCAL_ENABLED",
         "VIDEO_GEN_LOCAL_MODEL",
         "COMFYUI_SERVER_URL",
+        # Per-capability overrides for split-GPU ComfyUI setups. The names are
+        # assembled at runtime in tools/_comfyui/client.py
+        # (COMFYUI_<CAPABILITY>_SERVER_URL), so a literal scan cannot see them;
+        # keep this set aligned with per_capability_env_var_overrides in
+        # tools/_comfyui/metadata.py, which the contract test reads as the
+        # authoritative list.
+        "COMFYUI_IMAGE_SERVER_URL",
         "COMFYUI_VIDEO_SERVER_URL",
+        "COMFYUI_MUSIC_SERVER_URL",
     }
 )
 
