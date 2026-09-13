@@ -134,6 +134,48 @@ def test_env_loader_does_not_interpolate(monkeypatch: pytest.MonkeyPatch) -> Non
     assert os.environ.get("FAL_KEY") != "OPERATOR-REAL-SECRET"
 
 
+def test_nul_value_is_rejected_not_raised(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An embedded NUL in an allow-listed value must be dropped, not raised.
+
+    ``os.environ[key] = value`` raises ``ValueError`` on a NUL byte, and the
+    loader runs at module scope in ``tools/base_tool``, so an uncaught raise
+    would abort ``import tools.base_tool``. The value is untrusted input like
+    the key, so it is validated too: a NUL-bearing pair is reported as rejected
+    and skipped, never written.
+    """
+    monkeypatch.delenv("FAL_KEY", raising=False)
+
+    applied, rejected = apply_env_entries([("FAL_KEY", "sk-live\x00")], warn=False)
+
+    assert applied == []
+    assert rejected == ["FAL_KEY"]
+    assert os.environ.get("FAL_KEY") is None
+
+
+def test_executable_selection_keys_are_denied() -> None:
+    """Names whose value is the program a tool spawns must never be honoured.
+
+    ``BLENDER_PATH`` / ``SADTALKER_PATH`` / ``WAV2LIP_PATH`` are consumed as
+    ``argv[0]`` by the graphics/avatar tools, so a ``.env`` carrying one is
+    remote code execution. They live in ``DENIED_ENV_KEYS`` and are also caught
+    by the ``*_PATH`` / ``*_EXEC`` / ``*_BIN`` / ``*_CMD`` / ``*_SHELL`` /
+    ``*_RUNNER`` fail-closed shape, so a future allow-list addition cannot
+    reintroduce the redirect.
+    """
+    for name in ("BLENDER_PATH", "SADTALKER_PATH", "WAV2LIP_PATH"):
+        assert is_allowed_env_key(name) is False
+    # Fail-closed: any future executable-selection shape is denied.
+    assert is_allowed_env_key("MYTOOL_PATH") is False
+    assert is_allowed_env_key("FOO_EXECUTABLE") is False
+    assert is_allowed_env_key("FOO_BIN") is False
+    assert is_allowed_env_key("FOO_COMMAND") is False
+    assert is_allowed_env_key("FOO_SHELL") is False
+    assert is_allowed_env_key("FOO_RUNNER") is False
+    # Legit config keys must still pass.
+    assert is_allowed_env_key("FAL_KEY") is True
+    assert is_allowed_env_key("OPENMONTAGE_CACHE_DIR") is True
+
+
 def test_registry_delegates_to_the_shared_loader(monkeypatch: pytest.MonkeyPatch) -> None:
     """Both entry points must share one parser rather than keep two copies."""
     import tools.base_tool as base_tool
@@ -570,6 +612,49 @@ def test_js_env_reader_rejects_the_bash_func_prefix() -> None:
         "BASH_FUNC_x%%=... smuggles a shell function into every bash child"
     )
     assert "isSafeEnvKey" in text, "the JavaScript reader no longer gates writes"
+
+
+def test_js_rejected_note_sanitizes_control_bytes() -> None:
+    """The JS rejected-key note must not echo raw terminal control bytes.
+
+    A ``.env`` key name that fails the gate (e.g. one carrying ESC/BEL/bidi)
+    must be sanitised to printable ASCII before it is written to stderr,
+    otherwise a hostile ``.env`` can forge a status line or hijack the terminal
+    title (CWE-117). Verified by executing ``loadEnvFromDir`` under node against
+    a crafted ``.env`` whose rejected line carries control bytes.
+    """
+    import subprocess
+    import tempfile
+    from pathlib import Path as _Path
+
+    root = _Path(tempfile.mkdtemp())
+    (root / ".env").write_text(
+        "\x1b[2K\x1b[32m[ok] credential scan passed\x1b[0m=1\n"
+        "PAYLOAD\x07\x1b]0;owned\x07=x\n"
+        "HEYGEN_API_KEY=legit-key\n"
+    )
+
+    script = (
+        "import { loadEnvFromDir } from "
+        f"'{_JS_ENV_READER.as_uri()}';\n"
+        "delete process.env.HEYGEN_API_KEY;\n"
+        f"loadEnvFromDir({str(root)!r});\n"
+        "if (process.env.HEYGEN_API_KEY !== 'legit-key') { "
+        "console.error('LEGIT-KEY-NOT-APPLIED'); process.exit(2); }\n"
+        "process.exit(0);\n"
+    )
+    res = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, (
+        f"loadEnvFromDir rejected a valid key: rc={res.returncode} "
+        f"stderr={res.stderr}"
+    )
+    # The forged status line must not survive as control bytes in the report.
+    assert "\x1b" not in res.stderr, "ESC byte leaked into the JS rejected-key note"
+    assert "\x07" not in res.stderr, "BEL byte leaked into the JS rejected-key note"
 
 
 def test_rejected_key_report_is_not_a_warning(

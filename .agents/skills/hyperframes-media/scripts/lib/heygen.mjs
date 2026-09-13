@@ -25,53 +25,51 @@ export const HEYGEN_BASE = "https://api.heygen.com/v3";
 // vendored so the skill ships standalone; tests/contracts/test_env_allowlist.py
 // fails if the two copies drift apart.
 const DENIED_ENV_KEYS = new Set([
-  // Dynamic loader / injected libraries.
-  "LD_PRELOAD",
-  "LD_LIBRARY_PATH",
-  "LD_AUDIT",
+  "BASHOPTS",
+  "BASH_ENV",
+  "BLENDER_PATH",
+  "CLASSPATH",
+  "CURL_CA_BUNDLE",
+  "DYLD_FRAMEWORK_PATH",
   "DYLD_INSERT_LIBRARIES",
   "DYLD_LIBRARY_PATH",
-  "DYLD_FRAMEWORK_PATH",
-  // Shell startup hooks.
-  "BASH_ENV",
   "ENV",
-  "SHELLOPTS",
-  "BASHOPTS",
-  "PROMPT_COMMAND",
-  "IFS",
-  // Interpreter search paths and startup hooks.
-  "PYTHONPATH",
-  "PYTHONHOME",
-  "PYTHONSTARTUP",
-  "NODE_OPTIONS",
-  "NODE_PATH",
-  "NODE_EXTRA_CA_CERTS",
-  "PERL5LIB",
-  "RUBYLIB",
-  "CLASSPATH",
-  "JAVA_TOOL_OPTIONS",
-  "_JAVA_OPTIONS",
-  // Process and session basics.
-  "PATH",
-  "HOME",
-  "TMPDIR",
-  "PWD",
-  "OLDPWD",
-  "SHELL",
-  "USER",
-  "LOGNAME",
-  // Credential and trust-store redirection.
-  "SSH_AUTH_SOCK",
-  "GIT_SSH",
-  "GIT_SSH_COMMAND",
   "GIT_CONFIG_GLOBAL",
   "GIT_CONFIG_SYSTEM",
-  "REQUESTS_CA_BUNDLE",
-  "CURL_CA_BUNDLE",
-  "SSL_CERT_FILE",
-  "SSL_CERT_DIR",
+  "GIT_SSH",
+  "GIT_SSH_COMMAND",
+  "HOME",
+  "IFS",
+  "JAVA_TOOL_OPTIONS",
+  "LD_AUDIT",
+  "LD_LIBRARY_PATH",
+  "LD_PRELOAD",
+  "LOGNAME",
+  "NODE_EXTRA_CA_CERTS",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "OLDPWD",
+  "PATH",
+  "PERL5LIB",
   "PIP_CONFIG_FILE",
   "PIP_INDEX_URL",
+  "PROMPT_COMMAND",
+  "PWD",
+  "PYTHONHOME",
+  "PYTHONPATH",
+  "PYTHONSTARTUP",
+  "REQUESTS_CA_BUNDLE",
+  "RUBYLIB",
+  "SADTALKER_PATH",
+  "SHELL",
+  "SHELLOPTS",
+  "SSH_AUTH_SOCK",
+  "SSL_CERT_DIR",
+  "SSL_CERT_FILE",
+  "TMPDIR",
+  "USER",
+  "WAV2LIP_PATH",
+  "_JAVA_OPTIONS"
 ]);
 
 // Bash exports shell functions as BASH_FUNC_<name>%%; never honour those.
@@ -99,7 +97,6 @@ const ALLOWED_ENV_KEYS = new Set([
   'AZURE_TTS_ENDPOINT',
   'BACKLOT_PORT',
   'BFL_API_KEY',
-  'BLENDER_PATH',
   'COMFYUI_IMAGE_SERVER_URL',
   'COMFYUI_MUSIC_SERVER_URL',
   'COMFYUI_SERVER_URL',
@@ -152,7 +149,6 @@ const ALLOWED_ENV_KEYS = new Set([
   'RUNWAYML_API_SECRET',
   'RUNWAY_API_KEY',
   'RUN_KLING_DOC_LIVE_CHECK',
-  'SADTALKER_PATH',
   'SUNO_API_KEY',
   'TENCENT_TOKENHUB_API_KEY',
   'UNSPLASH_ACCESS_KEY',
@@ -161,8 +157,7 @@ const ALLOWED_ENV_KEYS = new Set([
   'VIDEVO_API_KEY',
   'VOLC_ACCESSKEY',
   'VOLC_SECRETKEY',
-  'WAV2LIP_PATH',
-  'XAI_API_KEY',
+  'XAI_API_KEY'
 ]);
 
 // True only for names a project .env is allowed to export.
@@ -201,10 +196,20 @@ export function loadEnvFromDir(startDir) {
         }
         if (!(key in process.env)) process.env[key] = val;
       }
-      if (rejected.size > 0) {
+      if (rejected.size > 0 && process.env.OPENMONTAGE_QUIET_ENV_WARNINGS !== "1") {
+        // A .env is untrusted input, so a rejected key name may carry terminal
+        // control bytes (ESC/BEL/bidi/OSC). Strip everything outside printable
+        // ASCII before echoing, cap each name, and cap the list -- mirroring the
+        // Python reporter (lib/env_allowlist.warn_rejected_keys) and never
+        // letting a hostile .env paint a forged status line on the operator's
+        // terminal.
+        const sanitize = (s) => s.replace(/[^\x20-\x7e]/g, "?").slice(0, 64);
+        const names = [...rejected].map(sanitize).sort();
+        const shown = names.slice(0, 10).join(", ");
+        const more = names.length > 10 ? ` (+${names.length - 10} more)` : "";
         process.stderr.write(
           `! ignored .env keys that could redirect the child processes this engine spawns: ` +
-            `${[...rejected].sort().join(", ")}\n`,
+            `${shown}${more}\n`,
         );
       }
       return;

@@ -154,15 +154,17 @@ _MEDIA_LIBRARY_KEYS = frozenset(
 _LOCAL_TOOLING_KEYS = frozenset(
     {
         "BACKLOT_PORT",
-        "BLENDER_PATH",
         "MUSIC_LIBRARY_DIR",
         "OPENMONTAGE_CACHE_DIR",
         "OPENMONTAGE_CACHE_MAX_GB",
         "OPENMONTAGE_PROJECTS_DIR",
         # Silences the "ignored .env keys" note (see warn_rejected_keys).
         "OPENMONTAGE_QUIET_ENV_WARNINGS",
-        "SADTALKER_PATH",
-        "WAV2LIP_PATH",
+        # BLENDER_PATH / SADTALKER_PATH / WAV2LIP_PATH are NOT here on purpose:
+        # their values are the *program* a tool spawns (argv[0]), not a config
+        # string, so a .env line for one of them is remote-code-execution. They
+        # live in DENIED_ENV_KEYS instead (see the executable-selection note
+        # there) and are therefore never honoured out of a project .env.
     }
 )
 
@@ -189,6 +191,17 @@ ALLOWED_ENV_KEYS = frozenset(
 # attacker-supplied code in every child process".
 DENIED_ENV_KEYS = frozenset(
     {
+        # Executable selection. These names are consumed as the program to run
+        # (argv[0]) rather than as configuration, so honouring one out of a .env
+        # lets the file's author choose what the pipeline executes:
+        #   tools/graphics/blender_world.py   -> BLENDER_PATH
+        #   tools/avatar/talking_head.py      -> SADTALKER_PATH
+        #   tools/avatar/lip_sync.py          -> WAV2LIP_PATH
+        # Keeping them denied means a future allow-list edit cannot reintroduce
+        # the redirect; operators who genuinely need them export their own shell.
+        "BLENDER_PATH",
+        "SADTALKER_PATH",
+        "WAV2LIP_PATH",
         # Dynamic loader / injected libraries.
         "LD_PRELOAD",
         "LD_LIBRARY_PATH",
@@ -244,6 +257,13 @@ _BASH_FUNC_PREFIX = "BASH_FUNC_"
 
 _KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
+# Executable-selection shape: a name ending in _PATH or containing _EXEC / _BIN
+# / _CMD / _SHELL / _RUNNER is conventionally a program the tool spawns. A .env
+# must never be able to pick which binary runs, so fail closed on this shape
+# before the allow-list is consulted. Operators set these in their own shell,
+# where the loaders never override them.
+_EXECUTABLE_SELECTION_RE = re.compile(r"_PATH$|_EXEC|_BIN|_CMD|_SHELL|_RUNNER", re.IGNORECASE)
+
 # Rejected names already reported, so the three entry points together produce
 # one note per key per process instead of repeating it on every load.
 _REPORTED_REJECTED_KEYS: Set[str] = set()
@@ -252,6 +272,8 @@ _REPORTED_REJECTED_KEYS: Set[str] = set()
 def is_allowed_env_key(key: str) -> bool:
     """Return True only for keys this project deliberately reads from ``.env``."""
     if key in DENIED_ENV_KEYS or key.startswith(_BASH_FUNC_PREFIX):
+        return False
+    if _EXECUTABLE_SELECTION_RE.search(key):
         return False
     return key in ALLOWED_ENV_KEYS
 
@@ -303,6 +325,17 @@ def apply_env_entries(
     rejected: List[str] = []
     for key, value in pairs:
         if not is_allowed_env_key(key):
+            rejected.append(key)
+            continue
+        # A NUL byte cannot be represented in a process environment: CPython
+        # raises ValueError from ``os.environ[key] = value``, and os.putenv /
+        # execve do the same. A .env line must never be able to abort the caller
+        # -- ``_load_dotenv()`` runs at module scope in tools/base_tool.py, so an
+        # uncaught raise here would turn one corrupt-looking byte into a failed
+        # ``import tools.base_tool``. The vendored JS reader truncates at the NUL
+        # instead of throwing, so drop the entry and report it like any other
+        # refused key to keep the two readers consistent.
+        if "\x00" in value:
             rejected.append(key)
             continue
         if override or key not in os.environ:
